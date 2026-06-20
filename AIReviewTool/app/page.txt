@@ -1,0 +1,360 @@
+'use client';
+
+import { useState, useCallback, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { saveAs } from 'file-saver';
+import { Upload, FileText, Download, Loader as Loader2, CircleAlert as AlertCircle, CircleCheck as CheckCircle2, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+
+const DAILY_LIMIT = 10;
+
+interface RateLimitData {
+  date: string;
+  count: number;
+}
+
+function getRateLimitData(): RateLimitData {
+  if (typeof window === 'undefined') {
+    return { date: '', count: 0 };
+  }
+
+  const stored = localStorage.getItem('rate_limit');
+  if (!stored) {
+    return { date: '', count: 0 };
+  }
+
+  try {
+    const data = JSON.parse(stored) as RateLimitData;
+    return data;
+  } catch {
+    return { date: '', count: 0 };
+  }
+}
+
+function updateRateLimitData(): number {
+  const today = new Date().toISOString().split('T')[0];
+  let data = getRateLimitData();
+
+  if (data.date !== today) {
+    data = { date: today, count: 0 };
+  }
+
+  data.count += 1;
+  localStorage.setItem('rate_limit', JSON.stringify(data));
+
+  return DAILY_LIMIT - data.count;
+}
+
+function getRemainingCount(): number {
+  const today = new Date().toISOString().split('T')[0];
+  const data = getRateLimitData();
+
+  if (data.date !== today) {
+    return DAILY_LIMIT;
+  }
+
+  return Math.max(0, DAILY_LIMIT - data.count);
+}
+
+export default function Home() {
+  const [file, setFile] = useState<File | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [result, setResult] = useState<string>('');
+  const [error, setError] = useState<string>('');
+  const [remaining, setRemaining] = useState<number>(DAILY_LIMIT);
+
+  useEffect(() => {
+    setRemaining(getRemainingCount());
+  }, []);
+
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (selectedFile) {
+      setFile(selectedFile);
+      setError('');
+      setResult('');
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile) {
+      const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+      if (allowedTypes.includes(droppedFile.type)) {
+        setFile(droppedFile);
+        setError('');
+        setResult('');
+      } else {
+        setError('仅支持PDF和图片文件（PNG、JPG、WEBP）');
+      }
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleSubmit = async () => {
+    if (!file) return;
+
+    if (remaining <= 0) {
+      setError(`今日使用次数已达上限（${DAILY_LIMIT}次），请明天再试`);
+      return;
+    }
+
+    setIsProcessing(true);
+    setError('');
+    setResult('');
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || '处理文件时出错');
+        return;
+      }
+
+      setResult(data.result);
+      const newRemaining = updateRateLimitData();
+      setRemaining(newRemaining);
+    } catch (err) {
+      setError('网络错误，请稍后重试');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleDownloadWord = async () => {
+    if (!result) return;
+
+    const sections = result.split('\n').map((line) => {
+      if (line.startsWith('### ')) {
+        return new Paragraph({
+          children: [
+            new TextRun({
+              text: line.replace('### ', ''),
+              bold: true,
+              size: 24,
+            }),
+          ],
+          spacing: { after: 120, before: 240 },
+        });
+      } else if (line.startsWith('## ')) {
+        return new Paragraph({
+          children: [
+            new TextRun({
+              text: line.replace('## ', ''),
+              bold: true,
+              size: 28,
+            }),
+          ],
+          spacing: { after: 120, before: 360 },
+        });
+      } else if (line.startsWith('# ')) {
+        return new Paragraph({
+          children: [
+            new TextRun({
+              text: line.replace('# ', ''),
+              bold: true,
+              size: 32,
+            }),
+          ],
+          spacing: { after: 200, before: 200 },
+        });
+      } else if (line.startsWith('- ') || line.startsWith('* ')) {
+        return new Paragraph({
+          children: [
+            new TextRun({
+              text: '• ' + line.substring(2),
+              size: 22,
+            }),
+          ],
+          spacing: { after: 60 },
+        });
+      } else if (line.trim() === '---') {
+        return new Paragraph({
+          children: [],
+          spacing: { after: 200 },
+        });
+      } else if (line.trim().length > 0) {
+        return new Paragraph({
+          children: [
+            new TextRun({
+              text: line,
+              size: 22,
+            }),
+          ],
+          spacing: { after: 80 },
+        });
+      }
+      return new Paragraph({
+        children: [],
+        spacing: { after: 60 },
+      });
+    });
+
+    const doc = new Document({
+      sections: [
+        {
+          children: sections,
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    saveAs(blob, '复习大纲.docx');
+  };
+
+  const clearFile = useCallback(() => {
+    setFile(null);
+    setResult('');
+    setError('');
+  }, []);
+
+  return (
+    <main className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 dark:from-gray-950 dark:via-gray-900 dark:to-slate-900">
+      <div className="max-w-5xl mx-auto px-4 py-8 sm:py-12">
+        <header className="text-center mb-10">
+          <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-gray-900 dark:text-white mb-3">
+            作业复习大纲生成器
+          </h1>
+          <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
+            上传你的PDF或图片作业，AI自动提炼核心知识点、重点难点和高频考点
+          </p>
+        </header>
+
+        <Card className="backdrop-blur-sm bg-white/80 dark:bg-gray-800/80 border-0 shadow-xl mb-6">
+          <CardContent className="p-6 sm:p-8">
+            <div
+              className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center transition-all duration-300 ${
+                file
+                  ? 'border-green-300 bg-green-50/50 dark:bg-green-950/30'
+                  : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/30 dark:hover:bg-blue-950/20 cursor-pointer'
+              }`}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onClick={() => !file && document.getElementById('file-input')?.click()}
+            >
+              <input
+                id="file-input"
+                type="file"
+                accept=".pdf,image/png,image/jpeg,image/jpg,image/webp"
+                onChange={handleFileChange}
+                className="hidden"
+              />
+
+              {file ? (
+                <div className="flex flex-col items-center gap-4">
+                  <div className="flex items-center gap-3 bg-white dark:bg-gray-800 rounded-lg px-4 py-3 shadow-sm">
+                    <FileText className="w-6 h-6 text-blue-500" />
+                    <span className="text-gray-700 dark:text-gray-200 font-medium max-w-xs truncate">
+                      {file.name}
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        clearFile();
+                      }}
+                      className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full transition-colors"
+                    >
+                      <X className="w-4 h-4 text-gray-400" />
+                    </button>
+                  </div>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    文件大小: {(file.size / 1024 / 1024).toFixed(2)} MB
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-4">
+                  <div className="p-4 rounded-full bg-blue-100 dark:bg-blue-900/50">
+                    <Upload className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <div>
+                    <p className="text-lg font-medium text-gray-700 dark:text-gray-200">
+                      点击或拖拽文件到此区域
+                    </p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                      支持 PDF、PNG、JPG、WEBP 格式，最大 10MB
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <Button
+                onClick={handleSubmit}
+                disabled={!file || isProcessing || remaining <= 0}
+                className="w-full sm:w-auto px-8 py-6 text-lg font-medium bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 shadow-lg hover:shadow-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                size="lg"
+              >
+                {isProcessing ? (
+                  <>
+                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                    处理中...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-5 h-5 mr-2" />
+                    生成复习大纲
+                  </>
+                )}
+              </Button>
+
+              <div className="text-sm text-gray-500 dark:text-gray-400">
+                今日剩余次数: <span className="font-semibold text-blue-600 dark:text-blue-400">{remaining}</span> / {DAILY_LIMIT}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {error && (
+          <Alert variant="destructive" className="mb-6 animate-in fade-in slide-in-from-top-2 duration-300">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {result && (
+          <Card className="backdrop-blur-sm bg-white/80 dark:bg-gray-800/80 border-0 shadow-xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-xl font-bold text-gray-900 dark:text-white">
+                复习大纲
+              </CardTitle>
+              <Button
+                onClick={handleDownloadWord}
+                variant="outline"
+                className="flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                下载Word文档
+              </Button>
+            </CardHeader>
+            <CardContent>
+              <div className="prose prose-sm sm:prose-base dark:prose-invert max-w-none prose-headings:font-bold prose-h1:text-2xl prose-h1:text-gray-900 dark:prose-h1:text-white prose-h2:text-xl prose-h2:text-gray-800 dark:prose-h2:text-gray-100 prose-h3:text-lg prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-strong:text-gray-900 dark:prose-strong:text-white">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        <footer className="mt-12 text-center text-sm text-gray-500 dark:text-gray-400">
+          <p>本工具由 DeepSeek AI 提供智能分析支持</p>
+        </footer>
+      </div>
+    </main>
+  );
+}
