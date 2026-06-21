@@ -1,3 +1,4 @@
+export const runtime = 'edge'
 import { NextRequest, NextResponse } from 'next/server';
 import pdfParse from 'pdf-parse';
 import axios from 'axios';
